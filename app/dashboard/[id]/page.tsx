@@ -25,10 +25,12 @@ import { ethers } from 'ethers';
 import PolarisMerchantEscrow from '@/lib/artifacts/contracts/PolarisMerchantEscrow.sol/PolarisMerchantEscrow.json';
 import WebhookManager from '@/components/WebhookManager';
 import { CONTRACTS } from '@/lib/constants';
+import { getCoFHEClient, decryptView, encryptUint64, decryptForTransaction } from '@/lib/cofhe';
+import { FheTypes } from '@cofhe/sdk';
 
 const MERCHANT_ROUTER_ABI = [
-    "function merchantWithdraw(address token, uint256 amount, uint64 destChainId) external",
-    "function merchantBalances(address merchant, address token) view returns (uint256)"
+    "function merchantWithdraw(address token, (uint256 ctHash, uint8 securityZone, uint8 utype, bytes signature) encryptedAmount, uint64 destChainId) external",
+    "function getMerchantBalance(address merchant, address token) view returns (uint256)"
 ];
 
 // Mock USDC on Sepolia
@@ -111,7 +113,7 @@ export default function AppDetails() {
     const fetchBalance = async () => {
         if (!app?.escrow_contract) return;
         try {
-            const provider = new ethers.JsonRpcProvider('https://1rpc.io/sepolia');
+            const provider = new ethers.JsonRpcProvider('https://eth-sepolia.g.alchemy.com/v2/3qRB0TMQQv3hyKgav_6lF');
             const abi = ["function balanceOf(address) view returns (uint256)"];
             const usdc = new ethers.Contract(DEFAULT_STABLECOIN, abi, provider);
             const bal = await usdc.balanceOf(app.escrow_contract);
@@ -125,7 +127,7 @@ export default function AppDetails() {
         if (!app?.escrow_contract) return;
         setRefreshingLogs(true);
         try {
-            const provider = new ethers.JsonRpcProvider('https://1rpc.io/sepolia');
+            const provider = new ethers.JsonRpcProvider('https://eth-sepolia.g.alchemy.com/v2/3qRB0TMQQv3hyKgav_6lF');
             const contract = new ethers.Contract(app.escrow_contract, PolarisMerchantEscrow.abi, provider);
 
             const filter = contract.filters.PaymentSettled();
@@ -160,34 +162,38 @@ export default function AppDetails() {
     }, [app?.escrow_contract]);
 
     const fetchRouterBalance = async () => {
-        if (!user?.wallet?.address) return;
+        if (!wallet || !user?.wallet?.address) return;
         try {
-            // Use direct Sepolia RPC — no wallet provider needed for reads
-            const provider = new ethers.JsonRpcProvider('https://1rpc.io/sepolia');
-            const router = new ethers.Contract(CONTRACTS.MASTER.MERCHANT_ROUTER, MERCHANT_ROUTER_ABI, provider);
+            const externalProvider = await wallet.getEthereumProvider();
+            const provider = new ethers.BrowserProvider(externalProvider);
+            const signer = await provider.getSigner();
+            const client = await getCoFHEClient(signer);
+            const router = new ethers.Contract(CONTRACTS.MASTER.MERCHANT_ROUTER, MERCHANT_ROUTER_ABI, signer);
 
             let totalBal = BigInt(0);
 
-            // Check balance on merchant's Privy wallet
+            // Decrypt balance on merchant's Privy wallet address
             try {
-                const walletBal = await router.merchantBalances(user.wallet.address, DEFAULT_STABLECOIN);
-                totalBal += walletBal;
-            } catch {}
-
-            // Check balance on escrow contract address
-            if (app?.escrow_contract && app.escrow_contract !== '0x0000000000000000000000000000000000000000') {
-                try {
-                    const escrowBal = await router.merchantBalances(app.escrow_contract, DEFAULT_STABLECOIN);
-                    totalBal += escrowBal;
-                } catch {}
+                const handle = await router.getMerchantBalance(user.wallet.address, DEFAULT_STABLECOIN);
+                if (handle > 0n) {
+                    const decryptedVal = await decryptView(client, handle, FheTypes.Uint64);
+                    totalBal += decryptedVal;
+                }
+            } catch (e) {
+                console.error("Failed to decrypt merchant wallet balance", e);
             }
 
             // Also check the wallet_address stored on the app record
             if (app?.wallet_address && app.wallet_address.toLowerCase() !== (user.wallet.address || '').toLowerCase()) {
                 try {
-                    const appWalletBal = await router.merchantBalances(app.wallet_address, DEFAULT_STABLECOIN);
-                    totalBal += appWalletBal;
-                } catch {}
+                    const handle = await router.getMerchantBalance(app.wallet_address, DEFAULT_STABLECOIN);
+                    if (handle > 0n) {
+                        const decryptedVal = await decryptView(client, handle, FheTypes.Uint64);
+                        totalBal += decryptedVal;
+                    }
+                } catch (e) {
+                    console.error("Failed to decrypt app wallet balance", e);
+                }
             }
 
             setRouterBalance(ethers.formatUnits(totalBal, 6));
@@ -197,59 +203,98 @@ export default function AppDetails() {
     };
 
     useEffect(() => {
-        if (user?.wallet?.address && app) {
+        if (user?.wallet?.address && app && wallet) {
             fetchRouterBalance();
             const int = setInterval(fetchRouterBalance, 15000);
             return () => clearInterval(int);
         }
-    }, [user?.wallet?.address, app]);
+    }, [user?.wallet?.address, app, wallet]);
 
     const handleRouterWithdraw = async () => {
-        if (!wallet) return;
+        if (!wallet || !user?.wallet?.address) return;
         setRouterWithdrawing(true);
         setError('');
+        setStatusText('Initiating encrypted withdrawal...');
         try {
             const externalProvider = await wallet.getEthereumProvider();
             const provider = new ethers.BrowserProvider(externalProvider);
             const signer = await provider.getSigner();
+            const client = await getCoFHEClient(signer);
             const router = new ethers.Contract(CONTRACTS.MASTER.MERCHANT_ROUTER, MERCHANT_ROUTER_ABI, signer);
 
-            const signerAddress = await signer.getAddress();
-            
-            // 1. Check signer balance
-            const signerBal = await router.merchantBalances(signerAddress, DEFAULT_STABLECOIN);
-            
-            // 2. Check escrow balance
-            let escrowBal = BigInt(0);
-            if (app?.escrow_contract) {
-                escrowBal = await router.merchantBalances(app.escrow_contract, DEFAULT_STABLECOIN);
-            }
-
-            if (signerBal === BigInt(0) && escrowBal === BigInt(0)) {
+            // 1. Decrypt balance first to get full clear amount
+            const handle = await router.getMerchantBalance(user.wallet.address, DEFAULT_STABLECOIN);
+            if (handle === BigInt(0)) {
                 setError('No funds available for withdrawal in MerchantRouter');
                 return;
             }
 
-            setStatusText('Initiating withdrawal sequence...');
-
-            // Withdraw from Signer if balance exists
-            if (signerBal > BigInt(0)) {
-                console.log('Withdrawing from Signer address...');
-                const tx = await router.merchantWithdraw(DEFAULT_STABLECOIN, signerBal, 11155111);
-                await tx.wait();
-                console.log('Signer withdrawal complete');
+            const clearBalance = await decryptView(client, handle, FheTypes.Uint64);
+            if (clearBalance === BigInt(0)) {
+                setError('No funds available for withdrawal in MerchantRouter');
+                return;
             }
 
-            // Withdraw from Escrow if balance exists
-            if (escrowBal > BigInt(0) && app?.escrow_contract) {
-                // Escrow balance is credited on-chain to the escrow contract address.
-                // It can only be withdrawn by the escrow contract itself.
-                // For now, show it as available but note it requires escrow support.
-                console.log('Escrow has', ethers.formatUnits(escrowBal, 6), 'USDC on MerchantRouter (auto-settled)');
-                setStatusText('Escrow funds settled on-chain (' + ethers.formatUnits(escrowBal, 6) + ' USDC)');
+            setStatusText('Encrypting withdrawal amount...');
+            const encryptedAmt = await encryptUint64(client, clearBalance);
+
+            setStatusText('Submitting withdrawal request...');
+            // Destination chain ID: Ethereum Sepolia is 11155111
+            const tx = await router.merchantWithdraw(DEFAULT_STABLECOIN, encryptedAmt, 11155111);
+            setStatusText('Waiting for withdrawal authorization...');
+            const receipt = await tx.wait();
+
+            // 2. Parse WithdrawalRequested event from receipt
+            const poolManagerAddress = CONTRACTS.MASTER.POOL_MANAGER;
+            const poolInterface = new ethers.Interface([
+                "event WithdrawalRequested(address indexed user, bytes32 handle, uint256 nonce)"
+            ]);
+
+            let withdrawalHandle: string | null = null;
+            let nonce: bigint | null = null;
+
+            for (const log of receipt.logs) {
+                if (log.address.toLowerCase() === poolManagerAddress.toLowerCase()) {
+                    try {
+                        const parsed = poolInterface.parseLog(log);
+                        if (parsed && parsed.name === 'WithdrawalRequested') {
+                            withdrawalHandle = parsed.args.handle;
+                            nonce = parsed.args.nonce;
+                            break;
+                        }
+                    } catch (e) {
+                        // ignore log parsing errors
+                    }
+                }
             }
 
-            fetchRouterBalance();
+            if (!withdrawalHandle || nonce === null) {
+                throw new Error('WithdrawalRequested event not found in receipt');
+            }
+
+            // 3. Request off-chain decryption signature
+            setStatusText('Requesting decryption signature...');
+            const revealResult = await decryptForTransaction(client, BigInt(withdrawalHandle));
+
+            // 4. Submit signature to finalize withdrawal
+            setStatusText('Finalizing withdrawal on-chain...');
+            const poolManager = new ethers.Contract(
+                CONTRACTS.MASTER.POOL_MANAGER,
+                [
+                    "function finalizeWithdrawal(uint256 nonce, uint64 clearAmount, bytes calldata signature) external"
+                ],
+                signer
+            );
+
+            const finalizeTx = await poolManager.finalizeWithdrawal(
+                nonce,
+                revealResult.decryptedValue,
+                revealResult.signature
+            );
+            setStatusText('Waiting for finalization confirmation...');
+            await finalizeTx.wait();
+
+            await fetchRouterBalance();
             setStatusText('Withdrawal successful!');
             setTimeout(() => setStatusText(''), 3000);
         } catch (e: any) {

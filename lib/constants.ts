@@ -1,8 +1,8 @@
 export const CONTRACTS = {
     MASTER: {
-        POOL_MANAGER: "0x130AD70864F8F5A6f83058951B544a7be5Bc2bc0",
-        LOAN_ENGINE: "0xdE8B22E09f0BCfEC41900b8ef748Ec0c5FF18BD3",
-        SCORE_MANAGER: "0xB068daeb4CeDB6CEe14b7806a2e0F1E2184e512a",
+        POOL_MANAGER: "0xB7f5B6dc3978046c7cEA05EB529e500400290675",
+        LOAN_ENGINE: "0x2a5653E5621A197600757C35abEC1c6C50Ea5344",
+        SCORE_MANAGER: "0x6EfC88aFa5bA8c0f68EbCEd8410c3B1c54b87242",
         CREDIT_ORACLE: "0x7716D5ea002e42b3f0cCC75aCCE602832cF46be6",
         PROTOCOL_FUNDS: "0x1B19E402F4082Aa6704ea2444a2383C566806AC6",
         MERCHANT_ROUTER: "0xCa924A3bC86b2EaBDc01a3617CA89c3CD383B19B",
@@ -21,9 +21,9 @@ export const NETWORKS = {
         explorer: "https://sepolia.etherscan.io",
     },
     LOCAL_HARDHAT: {
-        chainId: 31337,
-        name: "Hardhat Local",
-        rpc: "http://127.0.0.1:8545",
-        explorer: "https://sepolia.etherscan.io",
+        chainId: 50312,
+        name: "Fhenix Local",
+        rpc: "http://localhost:8545",
+        explorer: "https://explorer.sepolia.fhenix.zone",
     },
 };
