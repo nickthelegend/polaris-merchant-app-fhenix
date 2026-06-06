@@ -39,3 +39,12 @@ Open [http://localhost:3000](http://localhost:3000) to view the application.
 
 ## 🔒 Integration Role
 The Merchant App coordinates with the `polaris-core` API to create bills and authorize checkout sessions for external storefronts like Shopify.
+
+---
+
+## ⚙️ Sepolia Contract Configurations
+The app is wired directly to the active Fhenix Sepolia smart contracts. The configuration can be inspected and updated in:
+* [`lib/constants.ts`](file:///d:/Project/fhenix/polaris-merchant-app-fhenix/lib/constants.ts)
+
+It imports JSON ABIs directly to coordinate payments and settle balances using confidential Fhenix-based routing.
+
