@@ -1,5 +1,7 @@
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import { PayWithPolaris } from '@/components/sdk/PayWithPolaris';
 import { ShoppingBag, Star, Package } from 'lucide-react';
 import Image from 'next/image';
